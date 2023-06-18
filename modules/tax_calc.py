@@ -12,7 +12,7 @@ def calculate_dividends_interest(cursor, tax_year):
     cursor.execute(sql)
 
     result = cursor.fetchone()
-    total = round(result[0] if result[0] else 0, 2)
+    total = result[0] if result[0] else 0
     return total
 
 
@@ -39,26 +39,101 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
             # Amount is negative for 'Buy'
             holdings[instrument]['cost_basis'] -= amount
             holdings[instrument]['quantity'] += quantity
-        elif trans_code == 'Sell' and settle_date[:4] == str(tax_year):
-            # Calculate gain or loss
-            avg_purchase_price = holdings[instrument]['cost_basis'] / \
-                holdings[instrument]['quantity']
-            gain_loss = amount - avg_purchase_price * \
-                quantity  # Amount is positive for 'Sell'
-            total_gain_loss += gain_loss
-            # Update holdings
-            holdings[instrument]['cost_basis'] -= avg_purchase_price * quantity
-            holdings[instrument]['quantity'] -= quantity
 
-    # Round to 2 decimal places
-    total_gain_loss = round(total_gain_loss, 2)
+        elif trans_code == 'Sell':
+            try:
+                # Calculate gain or loss
+                avg_purchase_price = holdings[instrument]['cost_basis'] / \
+                    holdings[instrument]['quantity']
+                gain_loss = amount - avg_purchase_price * \
+                    quantity  # Amount is positive for 'Sell'
+
+                # Update holdings
+                holdings[instrument]['cost_basis'] -= avg_purchase_price * quantity
+                holdings[instrument]['quantity'] -= quantity
+            except KeyError:
+                print(
+                    f"Cannot sell a stock that doesn't exist: " +
+                    f"Sold {quantity} {instrument} on {settle_date.split('T')[0]} for ${amount}")
+
+            # Adjust gain (loss) if the closing transaction occured this year
+            if settle_date[:4] == str(tax_year):
+                total_gain_loss += gain_loss
+
     return total_gain_loss
 
 
 def calculate_options_gains_and_losses(cursor, tax_year):
-    """Calculate capital gains and losses from options trades."""
-    # Implement the calculation
-    pass
+    cursor.execute("""
+        SELECT activity_date, description, trans_code, quantity, amount, instrument
+        FROM transactions
+        WHERE trans_code IN ('BTC', 'BTO', 'STC', 'STO', 'OEXP')
+        ORDER BY activity_date, process_date, settle_date,
+        CASE WHEN trans_code IN ('BTO', 'STO') THEN 0 ELSE 1 END
+    """)
+
+    open_positions = {}
+    closed_positions = {}
+    total_gain_or_loss = 0
+
+    for row in cursor.fetchall():
+        activity_date, description, trans_code, quantity, amount, instrument = row
+
+        # Clean option expiration description and quantity
+        if trans_code == 'OEXP':
+            description = description.replace("Option Expiration for ", "")
+            if quantity[-1] == 'S':
+                # Remove the last character from the quantity
+                quantity = quantity[:-1]
+        # Cast quantity to int because it is stored as text
+        quantity = int(quantity)
+
+        # Handle opening transactions
+        if trans_code in ('BTO', 'STO'):
+            if description not in open_positions:
+                open_positions[description] = {'cost': 0.0, 'quantity': 0}
+            # Amount is negative for 'Buy'
+            open_positions[description]['quantity'] += quantity
+            open_positions[description]['cost'] -= amount
+      
+        
+        # Handle closing transactions
+        elif trans_code in ('STC', 'BTC', 'OEXP'):
+            if description in open_positions:
+                avg_cost = open_positions[description]['cost'] / \
+                    open_positions[description]['quantity']
+                total_cost = avg_cost * quantity
+
+                # Add gain (loss) only if the closing transaction occured this year
+                if activity_date[:4] == str(tax_year):
+                    gain_or_loss = amount - total_cost
+                    total_gain_or_loss += gain_or_loss
+
+                    # Add instrument to closed positions and add gain (loss)
+                    if instrument not in closed_positions:
+                        closed_positions[instrument] = {'gain_loss': 0.0}
+                    closed_positions[instrument]['gain_loss'] += gain_or_loss
+
+                # Update open positions
+                open_positions[description]['quantity'] -= quantity
+                open_positions[description]['cost'] -= total_cost
+
+            # Ignore if there is no matching open position and the position closed last year
+            elif activity_date[:4] == str(tax_year):
+                # Throw an error and quit the program
+                print(f"Error: Cannot close an option that doesn't exist.")
+                raise SystemExit
+            
+    # Sort closed positions by gain (loss)
+    closed_positions = {k: v for k, v in sorted(
+        closed_positions.items(), key=lambda item: item[1]['gain_loss'], reverse=True)}
+    
+    # Print closed positions formatted .2f
+    print("Closed Positions order by profitability:")
+    for instrument, data in closed_positions.items():
+        print(f"{instrument}: ${data['gain_loss']:.2f}")
+
+    return total_gain_or_loss
 
 
 if __name__ == "__main__":
