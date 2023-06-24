@@ -3,15 +3,7 @@
 from modules.database import establish_connection
 from modules.tax_calc import calculate_total_fees, calculate_total_investment, calculate_dividends_interest, calculate_stock_gains_and_losses, calculate_options_gains_and_losses
 
-def main(tax_year):
-    process_year(2018);
-    process_year(2019);
-    process_year(2020);
-    process_year(2021);
-    process_year(2022);
-    process_year(2023);
-
-def process_year(tax_year)
+def process_year(tax_year):
     conn, cursor = establish_connection('transactions.sqlite')
 
     fees_paid = calculate_total_fees(cursor, tax_year)
@@ -30,6 +22,14 @@ def process_year(tax_year)
     print(f"Total stock gains and losses: ${stock_gains_and_losses:.2f}")
     print(f"Total option gains and losses: ${option_gains_and_losses:.2f}")
     print(f"Total gains and losses: ${total_gains_and_losses:.2f}")
+
+def main(tax_year):
+    process_year(2018);
+    process_year(2019);
+    process_year(2020);
+    process_year(2021);
+    process_year(2022);
+    process_year(2023);
 
 if __name__ == "__main__":
     main()
