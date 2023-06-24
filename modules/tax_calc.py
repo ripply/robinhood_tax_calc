@@ -8,6 +8,7 @@ def calculate_dividends_interest(cursor, tax_year):
         FROM transactions 
         WHERE trans_code IN ('INT', 'CDIV')
         AND activity_date >= '{tax_year}-01-01'
+        AND activity_date <= '{tax_year}-12-31'
     """
     cursor.execute(sql)
 
