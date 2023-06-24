@@ -23,7 +23,7 @@ def process_year(tax_year):
     print(f"Total option gains and losses: ${option_gains_and_losses:.2f}")
     print(f"Total gains and losses: ${total_gains_and_losses:.2f}")
 
-def main(tax_year):
+def main():
     process_year(2018);
     process_year(2019);
     process_year(2020);
