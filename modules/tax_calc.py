@@ -22,6 +22,7 @@ def calculate_total_fees(cursor, tax_year):
         FROM transactions 
         WHERE trans_code IN ('GOLD', 'MINT')
         AND activity_date >= '{tax_year}-01-01'
+        AND activity_date <= '{tax_year}-12-31'
     """
     cursor.execute(sql)
 
@@ -36,6 +37,7 @@ def calculate_total_investment(cursor, tax_year):
         FROM transactions 
         WHERE trans_code IN ('ACH')
         AND activity_date >= '{tax_year}-01-01'
+        AND activity_date <= '{tax_year}-12-31'
     """
     cursor.execute(sql)
 
