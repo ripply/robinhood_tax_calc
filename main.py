@@ -9,7 +9,7 @@ TAX_YEAR = 2020
 def main():
     conn, cursor = establish_connection('transactions.sqlite')
 
-    fees_paid = calculate_fees_paid(cursor, TAX_YEAR)
+    fees_paid = calculate_total_fees(cursor, TAX_YEAR)
     total_investment = calculate_total_investment(cursor, TAX_YEAR)
     dividends_and_interest = calculate_dividends_interest(cursor, TAX_YEAR)
     dividends_and_interest = calculate_dividends_interest(cursor, TAX_YEAR)
