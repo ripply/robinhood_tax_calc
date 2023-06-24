@@ -1,7 +1,7 @@
 # main.py
 
 from modules.database import establish_connection
-from modules.tax_calc import calculate_dividends_interest, calculate_stock_gains_and_losses, calculate_options_gains_and_losses
+from modules.tax_calc import calculate_total_fees, calculate_total_investment, calculate_dividends_interest, calculate_stock_gains_and_losses, calculate_options_gains_and_losses
 
 TAX_YEAR = 2020
 
