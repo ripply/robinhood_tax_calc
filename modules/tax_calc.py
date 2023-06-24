@@ -15,6 +15,33 @@ def calculate_dividends_interest(cursor, tax_year):
     total = result[0] if result[0] else 0
     return total
 
+def calculate_total_fees(cursor, tax_year):
+    """Calculate total fees paid to robinhood since year"""
+    sql = f"""
+        SELECT SUM(Amount) 
+        FROM transactions 
+        WHERE trans_code IN ('GOLD', 'MINT')
+        AND activity_date >= '{tax_year}-01-01'
+    """
+    cursor.execute(sql)
+
+    result = cursor.fetchone()
+    total = result[0] if result[0] else 0
+    return total
+
+def calculate_total_investment(cursor, tax_year):
+    """Calculate total investment since year"""
+    sql = f"""
+        SELECT SUM(Amount) 
+        FROM transactions 
+        WHERE trans_code IN ('ACH')
+        AND activity_date >= '{tax_year}-01-01'
+    """
+    cursor.execute(sql)
+
+    result = cursor.fetchone()
+    total = result[0] if result[0] else 0
+    return total
 
 def calculate_stock_gains_and_losses(cursor, tax_year):
     """Calculate capital gains and losses from stock trades."""
