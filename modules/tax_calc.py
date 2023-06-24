@@ -21,7 +21,7 @@ def calculate_total_fees(cursor, tax_year):
     sql = f"""
         SELECT SUM(Amount) 
         FROM transactions 
-        WHERE trans_code IN ('GOLD', 'MINT')
+        WHERE trans_code IN ('GOLD', 'MINT', 'AFEE')
         AND activity_date >= '{tax_year}-01-01'
         AND activity_date <= '{tax_year}-12-31'
     """
