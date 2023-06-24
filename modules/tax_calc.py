@@ -6,7 +6,7 @@ def calculate_dividends_interest(cursor, tax_year):
     sql = f"""
         SELECT SUM(Amount) 
         FROM transactions 
-        WHERE trans_code IN ('INT', 'CDIV')
+        WHERE trans_code IN ('INT', 'CDIV', 'MDIV')
         AND activity_date >= '{tax_year}-01-01'
         AND activity_date <= '{tax_year}-12-31'
     """
