@@ -17,11 +17,11 @@ def calculate_dividends_interest(cursor, tax_year):
     return total
 
 def calculate_total_fees(cursor, tax_year):
-    """Calculate total fees paid to robinhood since year"""
+    """Calculate total fees paid to robinhood since year (Gold, Margin, ADR fee and Foreign tax)"""
     sql = f"""
         SELECT SUM(Amount) 
         FROM transactions 
-        WHERE trans_code IN ('GOLD', 'MINT', 'AFEE')
+        WHERE trans_code IN ('GOLD', 'MINT', 'AFEE', 'DTAX')
         AND activity_date >= '{tax_year}-01-01'
         AND activity_date <= '{tax_year}-12-31'
     """
