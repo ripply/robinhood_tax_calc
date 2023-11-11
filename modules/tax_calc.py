@@ -1,12 +1,11 @@
 from .database import establish_connection
 
-
 def calculate_dividends_interest(cursor, tax_year):
     """Calculate total dividends and interest."""
     sql = f"""
         SELECT SUM(Amount) 
         FROM transactions 
-        WHERE trans_code IN ('INT', 'CDIV', 'MDIV')
+        WHERE trans_code IN ('INT', 'IADJ', 'CDIV', 'MDIV')
         AND activity_date >= '{tax_year}-01-01'
         AND activity_date <= '{tax_year}-12-31'
     """
