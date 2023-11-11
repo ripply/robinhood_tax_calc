@@ -20,7 +20,7 @@ def calculate_total_fees(cursor, tax_year):
     sql = f"""
         SELECT SUM(Amount) 
         FROM transactions 
-        WHERE trans_code IN ('GOLD', 'MINT', 'AFEE', 'DTAX')
+        WHERE trans_code IN ('GOLD', 'MINT', 'AFEE', 'DFEE', 'DTAX')
         AND activity_date >= '{tax_year}-01-01'
         AND activity_date <= '{tax_year}-12-31'
     """
@@ -61,7 +61,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
         settle_date, instrument, trans_code, quantity, amount = row
         # Cast quantity to int because it is stored as text
         quantity = float(quantity)
-        if trans_code == 'Buy':
+        if trans_code in ('Buy', 'BCXL'):
             # Add to holdings
             if instrument not in holdings:
                 holdings[instrument] = {'cost_basis': 0.0, 'quantity': 0}
