@@ -56,7 +56,7 @@ def normalize_splits(cursor):
     cursor.execute(sql)
 
     for row in cursor.fetchall():
-        instrument, trans_code, activity_date = row
+        instrument, trans_code, activity_date, quantity = row
         # print all rows
         print(
             f"Split {instrument} {trans_code} on {activity_date} for ${quantity}")
