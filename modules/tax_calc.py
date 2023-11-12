@@ -45,12 +45,28 @@ def calculate_total_investment(cursor, tax_year):
     total = result[0] if result[0] else 0
     return total
 
+def normalize_splits(cursor, tax_year):
+    """find splits"""
+    sql = f"""
+        SELECT instrument, trans_code, activity_date, quantity
+        FROM transactions 
+        WHERE trans_code IN ('SPL', 'SPR')
+        ORDER BY activity_date
+    """
+    cursor.execute(sql)
+
+    for row in cursor.fetchall():
+        instrument, trans_code, activity_date = row
+        # print all rows
+        print(
+            f"Split {instrument} {trans_code} on {activity_date} for ${quantity}")
+
 def calculate_stock_gains_and_losses(cursor, tax_year):
     """Calculate capital gains and losses from stock trades."""
     cursor.execute("""
         SELECT settle_date, instrument, trans_code, quantity, amount
         FROM transactions
-        WHERE trans_code IN ('Buy', 'Sell')
+        WHERE trans_code IN ('Buy', 'BCXL', 'Sell')
         ORDER BY activity_date, process_date, settle_date
     """)
 
@@ -61,7 +77,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
         settle_date, instrument, trans_code, quantity, amount = row
         # Cast quantity to int because it is stored as text
         quantity = float(quantity)
-        if trans_code in ('Buy', 'BCXL'):
+        if trans_code in ('Buy'):
             # Add to holdings
             if instrument not in holdings:
                 holdings[instrument] = {'cost_basis': 0.0, 'quantity': 0}
@@ -69,7 +85,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
             holdings[instrument]['cost_basis'] -= amount
             holdings[instrument]['quantity'] += quantity
 
-        elif trans_code == 'Sell':
+        elif trans_code in ('Sell', 'BCXL'):
             try:
                 # Calculate gain or loss
                 avg_purchase_price = holdings[instrument]['cost_basis'] / \
