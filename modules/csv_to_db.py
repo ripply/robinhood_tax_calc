@@ -60,8 +60,8 @@ def read_csv_and_insert_into_db(cursor, csv_file):
             for i in range(3):
                 row[i] = convert_date_format(row[i])
             # Convert price and amount columns
-            row[7] = convert_money_format(row[8])
-            row[8] = convert_money_format(row[9])
+            row[7] = convert_money_format(row[7])
+            row[8] = convert_money_format(row[8])
             insert_into_db(cursor, row)
             inserts += 1
 
