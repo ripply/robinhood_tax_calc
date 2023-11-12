@@ -6,6 +6,7 @@ from modules.tax_calc import calculate_total_fees, calculate_total_investment, c
 def process_year(tax_year):
     conn, cursor = establish_connection('transactions.sqlite')
 
+    normalize_splits(cursor, tax_year)
     fees_paid = calculate_total_fees(cursor, tax_year)
     total_investment = calculate_total_investment(cursor, tax_year)
     dividends_and_interest = calculate_dividends_interest(cursor, tax_year)
