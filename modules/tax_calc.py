@@ -45,7 +45,7 @@ def calculate_total_investment(cursor, tax_year):
     total = result[0] if result[0] else 0
     return total
 
-def normalize_splits(cursor, tax_year):
+def normalize_splits(cursor):
     """find splits"""
     sql = f"""
         SELECT instrument, trans_code, activity_date, quantity
