@@ -45,22 +45,6 @@ def calculate_total_investment(cursor, tax_year):
     total = result[0] if result[0] else 0
     return total
 
-def normalize_splits(cursor):
-    """find splits"""
-    sql = f"""
-        SELECT instrument, trans_code, activity_date, quantity
-        FROM transactions 
-        WHERE trans_code IN ('SPL', 'SPR')
-        ORDER BY activity_date
-    """
-    cursor.execute(sql)
-
-    for row in cursor.fetchall():
-        instrument, trans_code, activity_date, quantity = row
-        # print all rows
-        print(
-            f"Split {instrument} {trans_code} on {activity_date} for ${quantity}")
-
 def calculate_stock_gains_and_losses(cursor, tax_year):
     """Calculate capital gains and losses from stock trades."""
     cursor.execute("""
