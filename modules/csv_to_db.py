@@ -1,4 +1,5 @@
 import csv
+import uuid
 from datetime import datetime
 from .database import establish_connection
 
@@ -18,7 +19,15 @@ def create_table(cursor):
             amount REAL
         )
     """)
-
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS splits (
+            id INTEGER PRIMARY KEY,
+            instrument TEXT NOT NULL,
+            date TEXT NOT NULL,
+            from_factor INTEGER NOT NULL,
+            to_factor INTEGER NOT NULL
+        )
+    """)
 
 def convert_date_format(date_str):
     """Convert date format from MM/DD/YY to ISO 8601."""
@@ -38,11 +47,18 @@ def convert_money_format(money_str):
 
 
 def insert_into_db(cursor, row):
-    """Insert a row into the database."""
-    cursor.execute("""
-        INSERT INTO transactions (activity_date, process_date, settle_date, instrument, description, trans_code, quantity, price, amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, row)
+    if row.trans_code == "SPL" or row.trans_code == "SPR":
+        """Insert a row into the splits table."""
+        cursor.execute("""
+            INSERT INTO splits (id, instrument, date, from_factor, to_factor)
+            VALUES (?, ?, ?, ?, ?)
+        """, (uuid.uuid4(), row.instrument, row.settle_date, ))
+    else:
+        """Insert a row into the transactions table."""
+        cursor.execute("""
+            INSERT INTO transactions (activity_date, process_date, settle_date, instrument, description, trans_code, quantity, price, amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, row)
 
 
 def read_csv_and_insert_into_db(cursor, csv_file):
