@@ -22,7 +22,7 @@ def create_table(cursor):
 def create_splits_table(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS splits (
-            date TEXT,
+            settle_date TEXT,
             instrument TEXT,
             description TEXT,
             trans_code TEXT,
@@ -59,7 +59,7 @@ def insert_into_db(cursor, row):
 def insert_splits_into_db(cursor, row):
     """Insert a row into the splits table."""
     cursor.execute("""
-        INSERT INTO splits (date, instrument, description, trans_code, from_factor, to_factor, cumulative_factor)
+        INSERT INTO splits (settle_date, instrument, description, trans_code, from_factor, to_factor, cumulative_factor)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, row)
 
