@@ -56,7 +56,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
 
     splits = {}
     for row in cursor.fetchall():
-        splits[row.instrument] = row
+        splits[row['instrument']] = row
         
     cursor.execute("""
         SELECT settle_date, instrument, trans_code, quantity, amount
