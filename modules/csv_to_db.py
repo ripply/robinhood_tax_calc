@@ -98,7 +98,7 @@ def read_csv_and_insert_splits_into_db(cursor, csv_file):
                 break
             # Convert date columns
             row[0] = convert_date_format(row[0])
-            insert_into_splits_db(cursor, row)
+            insert_splits_into_db(cursor, row)
             inserts += 1
 
     print(f'Inserted splits {inserts} rows')
