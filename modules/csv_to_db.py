@@ -106,5 +106,6 @@ def read_csv_and_insert_splits_into_db(cursor, csv_file):
 if __name__ == "__main__":
     conn, cursor = establish_connection('transactions.sqlite')
     read_csv_and_insert_into_db(cursor, './data/transactions.csv')
+    read_csv_and_insert_splits_into_db(cursor, './data/splits.csv')
     conn.commit()
     conn.close()
