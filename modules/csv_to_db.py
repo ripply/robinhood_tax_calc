@@ -27,7 +27,8 @@ def create_splits_table(cursor):
             description TEXT,
             trans_code TEXT,
             from_factor REAL,
-            to_factor REAL
+            to_factor REAL,
+            cumulative_factor REAL
         )
     """)
 
@@ -58,8 +59,8 @@ def insert_into_db(cursor, row):
 def insert_splits_into_db(cursor, row):
     """Insert a row into the splits table."""
     cursor.execute("""
-        INSERT INTO splits (date, instrument, description, trans_code, from_factor, to_factor)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO splits (date, instrument, description, trans_code, from_factor, to_factor, cumulative_factor)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, row)
 
 def read_csv_and_insert_into_db(cursor, csv_file):
@@ -102,10 +103,10 @@ def read_csv_and_insert_splits_into_db(cursor, csv_file):
 
     print(f'Inserted splits {inserts} rows')
 
-
 if __name__ == "__main__":
     conn, cursor = establish_connection('transactions.sqlite')
     read_csv_and_insert_into_db(cursor, './data/transactions.csv')
     read_csv_and_insert_splits_into_db(cursor, './data/splits.csv')
+    calculate_cumulative_factor_splits(cursor)
     conn.commit()
     conn.close()
