@@ -3,7 +3,6 @@ import uuid
 from datetime import datetime
 from .database import establish_connection
 
-
 def create_table(cursor):
     """Create a new table for transactions."""
     cursor.execute("""
@@ -19,13 +18,16 @@ def create_table(cursor):
             amount REAL
         )
     """)
+
+def create_splits_table(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS splits (
-            id INTEGER PRIMARY KEY,
-            instrument TEXT NOT NULL,
-            date TEXT NOT NULL,
-            from_factor INTEGER NOT NULL,
-            to_factor INTEGER NOT NULL
+            date TEXT,
+            instrument TEXT,
+            description TEXT,
+            trans_code TEXT,
+            from_factor REAL,
+            to_factor REAL
         )
     """)
 
@@ -47,19 +49,18 @@ def convert_money_format(money_str):
 
 
 def insert_into_db(cursor, row):
-    if row.trans_code == "SPL" or row.trans_code == "SPR":
-        """Insert a row into the splits table."""
-        cursor.execute("""
-            INSERT INTO splits (id, instrument, date, from_factor, to_factor)
-            VALUES (?, ?, ?, ?, ?)
-        """, (uuid.uuid4(), row.instrument, row.settle_date, ))
-    else:
-        """Insert a row into the transactions table."""
-        cursor.execute("""
-            INSERT INTO transactions (activity_date, process_date, settle_date, instrument, description, trans_code, quantity, price, amount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, row)
+    """Insert a row into the transactions table."""
+    cursor.execute("""
+        INSERT INTO transactions (activity_date, process_date, settle_date, instrument, description, trans_code, quantity, price, amount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, row)
 
+def insert_splits_into_db(cursor, row):
+    """Insert a row into the splits table."""
+    cursor.execute("""
+        INSERT INTO splits (date, instrument, description, trans_code, from_factor, to_factor)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, row)
 
 def read_csv_and_insert_into_db(cursor, csv_file):
     """Read a CSV file and insert the data into an SQLite database."""
@@ -82,6 +83,24 @@ def read_csv_and_insert_into_db(cursor, csv_file):
             inserts += 1
 
     print(f'Inserted {inserts} rows')
+
+def read_csv_and_insert_splits_into_db(cursor, csv_file):
+    """Read splits CSV file and insert the data into an SQLite database."""
+    create_splits_table(cursor)
+    inserts = 0
+
+    with open(csv_file, newline='') as f:
+        reader = csv.reader(f)
+        headers = next(reader)  # Skip the header row
+        for row in reader:
+            if not any(field.strip() for field in row):
+                break
+            # Convert date columns
+            row[0] = convert_date_format(row[0])
+            insert_into_splits_db(cursor, row)
+            inserts += 1
+
+    print(f'Inserted splits {inserts} rows')
 
 
 if __name__ == "__main__":
