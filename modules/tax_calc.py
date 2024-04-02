@@ -50,15 +50,13 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
     cursor.execute("""
         SELECT settle_date, instrument, cumulative_factor
         FROM splits
-        GROUP BY instrument
         ORDER BY settle_date, instrument
     """)
 
     splits = {}
     for row in cursor.fetchall():
         settle_date, instrument, cumulative_factor = row 
-        splits[instrument]['settle_date'] = settle_date 
-        splits[instrument]['cumulative_factor'] = cumulative_factor 
+        splits[instrument][settle_date] = cumulative_factor
         
     cursor.execute("""
         SELECT settle_date, instrument, trans_code, quantity, amount
