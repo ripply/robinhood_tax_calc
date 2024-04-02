@@ -48,7 +48,7 @@ def calculate_total_investment(cursor, tax_year):
 def calculate_stock_gains_and_losses(cursor, tax_year):
     """Calculate capital gains and losses from stock trades."""
     cursor.execute("""
-        SELECT instrument
+        SELECT settle_date, instrument, cumulative_factor
         FROM splits
         GROUP BY instrument
         ORDER BY settle_date, instrument
