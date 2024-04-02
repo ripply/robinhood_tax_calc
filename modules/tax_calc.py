@@ -48,6 +48,17 @@ def calculate_total_investment(cursor, tax_year):
 def calculate_stock_gains_and_losses(cursor, tax_year):
     """Calculate capital gains and losses from stock trades."""
     cursor.execute("""
+        SELECT instrument
+        FROM splits
+        GROUP BY instrument
+        ORDER BY settle_date, instrument
+    """)
+
+    splits = {}
+    for row in cursor.fetchall():
+        splits[row.instrument] = row
+        
+    cursor.execute("""
         SELECT settle_date, instrument, trans_code, quantity, amount
         FROM transactions
         WHERE trans_code IN ('Buy', 'BCXL', 'Sell')
@@ -61,6 +72,10 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
         settle_date, instrument, trans_code, quantity, amount = row
         # Cast quantity to int because it is stored as text
         quantity = float(quantity)
+        # split correction
+        if settle_date >= splits[instrument]['settle_date']:
+            quantity = quantity * splits[instrument]['cumulative_factor']
+        
         if trans_code in ('Buy'):
             # Add to holdings
             if instrument not in holdings:
