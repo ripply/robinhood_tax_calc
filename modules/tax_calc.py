@@ -111,6 +111,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
             if settle_date[:4] == str(tax_year):
                 total_gain_loss += gain_loss
 
+    print(holdings);
     return total_gain_loss
 
 
