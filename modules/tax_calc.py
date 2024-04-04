@@ -57,7 +57,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
     for row in cursor.fetchall():
         settle_date, instrument, cumulative_factor = row
         if instrument not in splits:
-            holdings[instrument] = {}
+            splits[instrument] = {}
         splits[instrument][settle_date] = cumulative_factor
 
     print(splits)
