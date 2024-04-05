@@ -81,6 +81,8 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
             split_records = sorted(dict((key,value) for key, value in splits[instrument].items() if settle_date >= key))
             if len(split_records) > 0:
                 split_records_key = next(iter(split_records)) if len(split_records) == 1 else max(split_records)
+                print(f"{instrument}")
+                print(splits[instrument][split_records_key])
                 quantity = quantity * splits[instrument][split_records_key]
         
         if trans_code in ('Buy'):
