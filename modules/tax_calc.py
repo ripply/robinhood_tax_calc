@@ -77,7 +77,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year):
         # Cast quantity to int because it is stored as text
         quantity = float(quantity)
         # split correction
-        if instrument in splits and trans_code in ('Buy', 'Sell', 'BCXL'):
+        if instrument in splits and trans_code in ('Buy'):
             split_records = sorted(dict((key,value) for key, value in splits[instrument].items() if settle_date >= key))
             if len(split_records) > 0:
                 split_records_key = next(iter(split_records)) if len(split_records) == 1 else max(split_records)
