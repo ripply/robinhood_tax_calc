@@ -10,6 +10,7 @@ def create_table(cursor):
             activity_date TEXT,
             process_date TEXT,
             settle_date TEXT,
+            row INT,
             instrument TEXT,
             description TEXT,
             trans_code TEXT,
@@ -49,12 +50,12 @@ def convert_money_format(money_str):
         return result
 
 
-def insert_into_db(cursor, row):
+def insert_into_db(cursor, row, row_count):
     """Insert a row into the transactions table."""
     cursor.execute("""
-        INSERT INTO transactions (activity_date, process_date, settle_date, instrument, description, trans_code, quantity, price, amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, row)
+        INSERT INTO transactions (activity_date, process_date, settle_date, instrument, description, trans_code, quantity, price, amount, row)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, row + [row_count])
 
 def insert_splits_into_db(cursor, row):
     """Insert a row into the splits table."""
@@ -71,6 +72,7 @@ def read_csv_and_insert_into_db(cursor, csv_file):
     with open(csv_file, newline='') as f:
         reader = csv.reader(f)
         headers = next(reader)  # Skip the header row
+        row_index = 0
         for row in reader:
             if not any(field.strip() for field in row):
                 break
@@ -80,8 +82,10 @@ def read_csv_and_insert_into_db(cursor, csv_file):
             # Convert price and amount columns
             row[7] = convert_money_format(row[7])
             row[8] = convert_money_format(row[8])
-            insert_into_db(cursor, row)
+            insert_into_db(cursor, row, row_index)
             inserts += 1
+            row_index += 1
+
 
     print(f'Inserted {inserts} rows')
 
@@ -89,17 +93,7 @@ def read_csv_and_insert_splits_into_db(cursor, csv_file):
     """Read splits CSV file and insert the data into an SQLite database."""
     create_splits_table(cursor)
     inserts = 0
-
-    with open(csv_file, newline='') as f:
-        reader = csv.reader(f)
-        headers = next(reader)  # Skip the header row
-        for row in reader:
-            if not any(field.strip() for field in row):
-                break
-            # Convert date columns
-            row[0] = convert_date_format(row[0])
-            insert_splits_into_db(cursor, row)
-            inserts += 1
+    
 
     print(f'Inserted splits {inserts} rows')
 
