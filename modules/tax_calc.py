@@ -73,8 +73,10 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
       • Option expiration events (trans_code "OEXP") are processed similarly to sells,
         except that if no quantity is provided, all open options for that strike are expired.
       
-    Options are keyed using (instrument, description) so that different strikes/expirations
-    are processed separately.
+    Additionally, this version tracks:
+      • Gross Sales (total sale proceeds)
+      • Gross Cost Basis (total cost basis allocated to sold shares/contracts)
+      • Long Term and Short Term Capital Gains/Losses (using a 1-year/365-day cutoff)
     """
     # Include OEXP in the query.
     cursor.execute("""
@@ -118,6 +120,12 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     # (For reporting, also track total deferred (disallowed) losses.)
     disallowed_losses: Dict[str, float] = defaultdict(float)
 
+    # --- NEW: Additional metrics for sale transactions ---
+    gross_sales: Dict[str, float] = defaultdict(float)
+    gross_cost_basis: Dict[str, float] = defaultdict(float)
+    long_term_gain: Dict[str, float] = defaultdict(float)
+    short_term_gain: Dict[str, float] = defaultdict(float)
+
     # Process transactions sequentially.
     for trans in transactions:
         print(trans)
@@ -156,14 +164,24 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             used_from_current = min(trans.quantity, current_holding_wash)
             remaining_current_replacement = current_holding_wash - used_from_current
 
-            remaining_to_sell = trans.quantity
             sale_proceeds = abs(trans.amount)
+            # Calculate sale price per share (assumes a constant price per share for the entire transaction)
+            sale_price_per_share = sale_proceeds / trans.quantity
+
+            # --- NEW: Record per-lot breakdown for additional metrics ---
+            sale_breakdowns = []
+            remaining_to_sell = trans.quantity
             sale_cost_basis = 0.0
             # Remove shares from holdings using FIFO.
             while remaining_to_sell > 0 and holdings[key]:
                 lot = holdings[key][0]
                 sell_qty = min(remaining_to_sell, lot.quantity)
-                sale_cost_basis += sell_qty * lot.price
+                cost_basis_chunk = sell_qty * lot.price
+                proceeds_chunk = sell_qty * sale_price_per_share
+                holding_period_days = (trans.date - lot.date).days
+                sale_breakdowns.append((sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days))
+                sale_cost_basis += cost_basis_chunk
+
                 if lot.quantity > sell_qty:
                     lot.quantity -= sell_qty
                     lot.total_cost = lot.quantity * lot.price
@@ -172,7 +190,17 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 remaining_to_sell -= sell_qty
 
             net_gain_loss = sale_proceeds - sale_cost_basis
-            print(f"Sell on {trans.date}: Proceeds {sale_proceeds:.2f}, Cost basis {sale_cost_basis:.2f}, Net {net_gain_loss:.2f}")
+            print(f"Sell on {trans.date}: Proceeds ${sale_proceeds:.2f}, Cost basis ${sale_cost_basis:.2f}, Net ${net_gain_loss:.2f}")
+
+            # Update additional metrics from sale_breakdowns.
+            gross_sales[trans.instrument] += sale_proceeds
+            gross_cost_basis[trans.instrument] += sale_cost_basis
+            for sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days in sale_breakdowns:
+                gain_loss_chunk = proceeds_chunk - cost_basis_chunk
+                if holding_period_days >= 365:
+                    long_term_gain[trans.instrument] += gain_loss_chunk
+                else:
+                    short_term_gain[trans.instrument] += gain_loss_chunk
 
             # Look ahead for future buys (after the sale) within 30 days.
             future_replacement = sum(
@@ -202,14 +230,14 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                         realized_losses[trans.instrument] += (net_gain_loss) + (deferred_qty * loss_per_share)
                         print(f"  🔴 Partial Wash Sale: {deferred_qty} shares deferred, {realized_loss_qty} shares loss realized")
                     else:
-                        print(f"  🔴 Wash Sale: Entire loss of {(-net_gain_loss):.2f} deferred at {loss_per_share:.2f} per share")
+                        print(f"  🔴 Wash Sale: Entire loss of ${(-net_gain_loss):.2f} deferred at ${loss_per_share:.2f} per share")
                 else:
                     # No replacement shares: the entire loss is realized.
                     realized_losses[trans.instrument] += net_gain_loss
-                    print(f"  ✅ Loss of {net_gain_loss:.2f} realized")
+                    print(f"  ✅ Loss of ${net_gain_loss:.2f} realized")
             else:
                 realized_gains[trans.instrument] += net_gain_loss
-                print(f"  ✅ Gain of {net_gain_loss:.2f} realized")
+                print(f"  ✅ Gain of ${net_gain_loss:.2f} realized")
             print(f"---Realized losses: {realized_losses[trans.instrument]}")
 
         # --- Process Option Expiration ---
@@ -239,14 +267,22 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             )
             replacement_qty = remaining_current_replacement + future_replacement
 
-            # Process the expiration like a sale: remove lots using FIFO.
-            remaining_to_expire = trans.quantity
             expiration_proceeds = abs(trans.amount)
+            expiration_price_per_share = expiration_proceeds / trans.quantity
+
+            # --- NEW: Record per-lot breakdown for option expiration ---
+            expiration_breakdowns = []
+            remaining_to_expire = trans.quantity
             expiration_cost_basis = 0.0
             while remaining_to_expire > 0 and holdings[key]:
                 lot = holdings[key][0]
                 expire_qty = min(remaining_to_expire, lot.quantity)
-                expiration_cost_basis += expire_qty * lot.price
+                cost_basis_chunk = expire_qty * lot.price
+                proceeds_chunk = expire_qty * expiration_price_per_share
+                holding_period_days = (trans.date - lot.date).days
+                expiration_breakdowns.append((expire_qty, cost_basis_chunk, proceeds_chunk, holding_period_days))
+                expiration_cost_basis += cost_basis_chunk
+
                 if lot.quantity > expire_qty:
                     lot.quantity -= expire_qty
                     lot.total_cost = lot.quantity * lot.price
@@ -255,7 +291,17 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 remaining_to_expire -= expire_qty
 
             net_gain_loss = expiration_proceeds - expiration_cost_basis
-            print(f"Option Expiration on {trans.date}: Proceeds {expiration_proceeds:.2f}, Cost basis {expiration_cost_basis:.2f}, Net {net_gain_loss:.2f}")
+            print(f"Option Expiration on {trans.date}: Proceeds ${expiration_proceeds:.2f}, Cost basis ${expiration_cost_basis:.2f}, Net ${net_gain_loss:.2f}")
+
+            # Update additional metrics from expiration_breakdowns.
+            gross_sales[trans.instrument] += expiration_proceeds
+            gross_cost_basis[trans.instrument] += expiration_cost_basis
+            for expire_qty, cost_basis_chunk, proceeds_chunk, holding_period_days in expiration_breakdowns:
+                gain_loss_chunk = proceeds_chunk - cost_basis_chunk
+                if holding_period_days >= 365:
+                    long_term_gain[trans.instrument] += gain_loss_chunk
+                else:
+                    short_term_gain[trans.instrument] += gain_loss_chunk
 
             if net_gain_loss < 0:
                 if replacement_qty > 0:
@@ -272,13 +318,13 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                         realized_losses[trans.instrument] += (net_gain_loss) + (deferred_qty * loss_per_share)
                         print(f"  🔴 Partial Wash Sale: {deferred_qty} contracts deferred, {realized_loss_qty} contracts loss realized")
                     else:
-                        print(f"  🔴 Wash Sale: Entire loss of {(-net_gain_loss):.2f} deferred at {loss_per_share:.2f} per contract")
+                        print(f"  🔴 Wash Sale: Entire loss of ${(-net_gain_loss):.2f} deferred at ${loss_per_share:.2f} per contract")
                 else:
                     realized_losses[trans.instrument] += net_gain_loss
-                    print(f"  ✅ Loss of {net_gain_loss:.2f} realized")
+                    print(f"  ✅ Loss of ${net_gain_loss:.2f} realized")
             else:
                 realized_gains[trans.instrument] += net_gain_loss
-                print(f"  ✅ Gain of {net_gain_loss:.2f} realized")
+                print(f"  ✅ Gain of ${net_gain_loss:.2f} realized")
             print(f"---Realized losses: {realized_losses[trans.instrument]}")
 
         # (Any additional transaction types can be handled here...)
@@ -309,6 +355,10 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         print(f"    - Total Realized Gains: ${realized_gains[instrument]:.2f}")
         print(f"    - Total Realized Losses: ${realized_losses[instrument]:.2f}")
         print(f"    - Total Deferred (Wash Sale) Losses: ${disallowed_losses[instrument]:.2f}")
+        print(f"    - Gross Sales: ${gross_sales[instrument]:.2f}")
+        print(f"    - Gross Cost Basis (for sales): ${gross_cost_basis[instrument]:.2f}")
+        print(f"    - Long Term Capital Gain/Loss: ${long_term_gain[instrument]:.2f}")
+        print(f"    - Short Term Capital Gain/Loss: ${short_term_gain[instrument]:.2f}")
         net = realized_gains[instrument] + realized_losses[instrument]
         print(f"    - Net Realized Gain/Loss: ${net:.2f}")
         total_gain_loss += net
