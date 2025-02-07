@@ -25,9 +25,11 @@ class Transaction:
     trans_type: str
     quantity: float
     amount: float
+    description: str
 
     @property
     def is_option(self) -> bool:
+        # In this context BTO and STC are considered option trades.
         return self.trans_type in ('BTO', 'STC')
 
     @property
@@ -37,6 +39,17 @@ class Transaction:
     @property
     def is_sell(self) -> bool:
         return self.trans_type in ('Sell', 'STC')
+
+def get_key(trans: Transaction) -> tuple:
+    """
+    Returns a key used to segregate lots and wash sale adjustments.
+    For options, use (instrument, description) so that options on different strikes 
+    (or expiration dates) are handled separately. For stocks, use (instrument, False).
+    """
+    if trans.is_option:
+        return (trans.instrument, trans.description)
+    else:
+        return (trans.instrument, False)
 
 def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     """
@@ -48,14 +61,13 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
       • If the sale results in a loss, we now defer the loss only for the number
         of shares that will remain (or be purchased later) within 30 days.
       
-    This prevents a sale from being treated as a wash sale when all the shares
-    that were bought in the wash sale window are used to fill the sale.
+    By keying options using their full description, call strikes with different prices
+    (or expiration dates) are processed separately.
     """
     cursor.execute("""
         SELECT activity_date, settle_date, instrument, trans_code, quantity, amount, description
         FROM transactions
         WHERE trans_code IN ('Buy', 'BCXL', 'Sell', 'BTO', 'STC')
-          AND instrument in ('NKE')
         ORDER BY activity_date, process_date, settle_date, -row
     """)
 
@@ -69,18 +81,17 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             instrument=row[2],
             trans_type=row[3],
             quantity=float(row[4]),
-            amount=float(row[5])
+            amount=float(row[5]),
+            description=row[6]
         )
         for row in cursor.fetchall()
     ]
 
-    # holdings: for each instrument, separate FIFO deques for options vs stocks.
-    holdings: Dict[str, Dict[bool, Deque[Lot]]] = defaultdict(lambda: {
-        True: deque(),   # Options
-        False: deque()   # Stocks
-    })
+    # Use a single dictionary keyed by (instrument, identifier)
+    # For options, the identifier is the description; for stocks, simply False.
+    holdings: Dict[tuple, Deque[Lot]] = defaultdict(deque)
 
-    # pending_wash_sales holds deferred loss adjustments (one per sale transaction)
+    # pending_wash_sales holds deferred loss adjustments keyed in the same way.
     pending_wash_sales: Dict[tuple, List[dict]] = defaultdict(list)
 
     # Track realized gains and realized losses (losses not deferred)
@@ -92,10 +103,11 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     # Process transactions sequentially.
     for trans in transactions:
         print(trans)
+        key = get_key(trans)
+
         # --- Process Buys ---
         if trans.is_buy:
             total_cost = abs(trans.amount)
-            key = (trans.instrument, trans.is_option)
             adjustment = 0.0
             # Apply any pending wash sale adjustments if this buy occurs on/before their expiration.
             for pending in pending_wash_sales[key][:]:
@@ -113,16 +125,14 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 date=trans.date,
                 is_option=trans.is_option
             )
-            holdings[trans.instrument][trans.is_option].append(new_lot)
+            holdings[key].append(new_lot)
             print(f"Buy on {trans.date}: Quantity {trans.quantity}, Amount {abs(trans.amount)}, Adjustment {adjustment}, Price per unit {price_per_unit:.2f}")
 
         # --- Process Sells ---
         elif trans.is_sell:
-            # BEFORE removing shares, determine how many of the current holdings
-            # (purchased within the 30-day wash sale window) will remain AFTER the sale.
-            # Only shares still held after the sale count as replacement shares.
+            # Calculate replacement shares among lots purchased in the 30-day window.
             current_holding_wash = sum(
-                lot.quantity for lot in holdings[trans.instrument][trans.is_option]
+                lot.quantity for lot in holdings[key]
                 if (trans.date - timedelta(days=30)) <= lot.date <= trans.date
             )
             used_from_current = min(trans.quantity, current_holding_wash)
@@ -133,15 +143,15 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             sale_price_per_share = sale_proceeds / trans.quantity
             sale_cost_basis = 0.0
             # Remove shares from holdings using FIFO.
-            while remaining_to_sell > 0 and holdings[trans.instrument][trans.is_option]:
-                lot = holdings[trans.instrument][trans.is_option][0]
+            while remaining_to_sell > 0 and holdings[key]:
+                lot = holdings[key][0]
                 sell_qty = min(remaining_to_sell, lot.quantity)
                 sale_cost_basis += sell_qty * lot.price
                 if lot.quantity > sell_qty:
                     lot.quantity -= sell_qty
                     lot.total_cost = lot.quantity * lot.price
                 else:
-                    holdings[trans.instrument][trans.is_option].popleft()
+                    holdings[key].popleft()
                 remaining_to_sell -= sell_qty
 
             net_gain_loss = sale_proceeds - sale_cost_basis
@@ -152,7 +162,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 t.quantity for t in transactions 
                 if t.is_buy 
                 and t.instrument == trans.instrument 
-                and t.is_option == trans.is_option
+                and ( (t.description == trans.description) if trans.is_option else (t.is_option == trans.is_option) )
                 and trans.date < t.date <= trans.date + timedelta(days=30)
             )
             # Total replacement shares available: unsold current shares plus future buys.
@@ -163,7 +173,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                     # Defer loss only for the number of shares that are actually replaced.
                     deferred_qty = min(trans.quantity, replacement_qty)
                     loss_per_share = (-net_gain_loss) / trans.quantity
-                    key = (trans.instrument, trans.is_option)
                     pending_wash_sales[key].append({
                         'remaining_qty': deferred_qty,
                         'loss_per_share': loss_per_share,
@@ -173,7 +182,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                     # For shares not covered by a replacement, realize the loss.
                     realized_loss_qty = trans.quantity - deferred_qty
                     if realized_loss_qty > 0:
-                        realized_losses[trans.instrument] += (net_gain_loss)# + (deferred_qty * loss_per_share)
+                        realized_losses[trans.instrument] += (net_gain_loss) + (deferred_qty * loss_per_share)
                         print(f"  🔴 Partial Wash Sale: {deferred_qty} shares deferred, {realized_loss_qty} shares loss realized")
                     else:
                         print(f"  🔴 Wash Sale: Entire loss of {(-net_gain_loss):.2f} deferred at {loss_per_share:.2f} per share")
@@ -189,12 +198,20 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     # --- Final Summary ---
     print("\n🔹 Final Summary 🔹")
     total_gain_loss = 0.0
-    instruments = set(t.instrument for t in transactions)
-    for instrument in instruments:
+
+    # Collect holdings by instrument so we can report both stocks and options separately.
+    holdings_by_instrument: Dict[str, Dict[str, Deque[Lot]]] = defaultdict(dict)
+    for key, lots in holdings.items():
+        instrument, ident = key
+        # For stocks the ident is False; otherwise use the description string.
+        bucket = ident if ident is not False else "Stocks"
+        holdings_by_instrument[instrument][bucket] = lots
+
+    for instrument in holdings_by_instrument:
         print(f"\n{instrument} Summary:")
-        for is_option, lots in holdings[instrument].items():
+        for bucket, lots in holdings_by_instrument[instrument].items():
             if lots:
-                type_str = "Options" if is_option else "Stocks"
+                type_str = f"Option: {bucket}" if bucket != "Stocks" else "Stocks"
                 total_qty = sum(lot.quantity for lot in lots)
                 total_cost_basis = sum(lot.total_cost for lot in lots)
                 print(f"  {type_str}:")
@@ -204,7 +221,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         print(f"    - Total Realized Gains: ${realized_gains[instrument]:.2f}")
         print(f"    - Total Realized Losses: ${realized_losses[instrument]:.2f}")
         print(f"    - Total Deferred (Wash Sale) Losses: ${disallowed_losses[instrument]:.2f}")
-        print(f"    --- {realized_gains[instrument]} - {realized_losses[instrument]}")
         net = realized_gains[instrument] + realized_losses[instrument]
         print(f"    - Net Realized Gain/Loss: ${net:.2f}")
         total_gain_loss += net
