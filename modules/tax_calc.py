@@ -12,7 +12,7 @@ class Lot:
     date: datetime.date
     is_option: bool
     wash_sale_adjustment: float = 0.0
-    total_cost: float = 0.0  # Track total cost of the lot
+    total_cost: float = 0.0  # calculated as quantity * price
 
     def __post_init__(self):
         self.total_cost = self.quantity * self.price
@@ -25,32 +25,43 @@ class Transaction:
     trans_type: str
     quantity: float
     amount: float
-    
+
     @property
     def is_option(self) -> bool:
         return self.trans_type in ('BTO', 'STC')
-    
+
     @property
     def is_buy(self) -> bool:
         return self.trans_type in ('Buy', 'BTO')
-    
+
     @property
     def is_sell(self) -> bool:
         return self.trans_type in ('Sell', 'STC')
 
 def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
-    """Calculate capital gains/losses with correct wash sale handling."""
+    """
+    Calculate capital gains/losses with aggregated wash sale handling.
     
+    In this version:
+      • When a sell occurs, we remove shares from FIFO holdings until the sale
+        quantity is filled, and then compute one overall net gain/loss for that sale.
+      • If the sale results in a loss, we now defer the loss only for the number
+        of shares that will remain (or be purchased later) within 30 days.
+      
+    This prevents a sale from being treated as a wash sale when all the shares
+    that were bought in the wash sale window are used to fill the sale.
+    """
     cursor.execute("""
-        SELECT activity_date, settle_date, instrument, trans_code, quantity, amount
+        SELECT activity_date, settle_date, instrument, trans_code, quantity, amount, description
         FROM transactions
-        WHERE trans_code IN ('Buy', 'BCXL', 'Sell', 'BTO', 'STC') and instrument in ('AAPL')
+        WHERE trans_code IN ('Buy', 'BCXL', 'Sell', 'BTO', 'STC')
+          AND instrument in ('NKE')
         ORDER BY activity_date, process_date, settle_date, -row
     """)
-    
+
     def parse_date(date_string: str) -> datetime.date:
         return datetime.fromisoformat(date_string).date()
-    
+
     transactions: List[Transaction] = [
         Transaction(
             date=parse_date(row[0]),
@@ -62,116 +73,142 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         )
         for row in cursor.fetchall()
     ]
-    
+
+    # holdings: for each instrument, separate FIFO deques for options vs stocks.
     holdings: Dict[str, Dict[bool, Deque[Lot]]] = defaultdict(lambda: {
         True: deque(),   # Options
         False: deque()   # Stocks
     })
-    
-    pending_wash_sales: Dict[str, List[tuple]] = defaultdict(list)
-    
-    # Track gains and losses by instrument
+
+    # pending_wash_sales holds deferred loss adjustments (one per sale transaction)
+    pending_wash_sales: Dict[tuple, List[dict]] = defaultdict(list)
+
+    # Track realized gains and realized losses (losses not deferred)
     realized_gains: Dict[str, float] = defaultdict(float)
     realized_losses: Dict[str, float] = defaultdict(float)
+    # (For debugging/reporting we also track total deferred (disallowed) loss.)
     disallowed_losses: Dict[str, float] = defaultdict(float)
-    
-    def find_replacement_shares(trans: Transaction, window_start: datetime.date, 
-                              window_end: datetime.date) -> bool:
-        return any(
-            t.date > trans.date and t.date <= window_end and
-            t.is_buy and t.is_option == trans.is_option and
-            t.instrument == trans.instrument
-            for t in transactions
-        )
-    
+
+    # Process transactions sequentially.
     for trans in transactions:
         print(trans)
+        # --- Process Buys ---
         if trans.is_buy:
-            # Calculate total cost for the lot
             total_cost = abs(trans.amount)
+            key = (trans.instrument, trans.is_option)
+            adjustment = 0.0
+            # Apply any pending wash sale adjustments if this buy occurs on/before their expiration.
+            for pending in pending_wash_sales[key][:]:
+                if trans.date <= pending['expiration']:
+                    shares_to_apply = min(trans.quantity, pending['remaining_qty'])
+                    adjustment += shares_to_apply * pending['loss_per_share']
+                    pending['remaining_qty'] -= shares_to_apply
+                    if pending['remaining_qty'] <= 0:
+                        pending_wash_sales[key].remove(pending)
+            total_cost += adjustment  # Increase cost basis by deferred loss adjustment.
             price_per_unit = total_cost / trans.quantity
-            
             new_lot = Lot(
                 quantity=trans.quantity,
                 price=price_per_unit,
                 date=trans.date,
-                is_option=trans.is_option,
-                total_cost=total_cost
+                is_option=trans.is_option
             )
             holdings[trans.instrument][trans.is_option].append(new_lot)
-            
+            print(f"Buy on {trans.date}: Quantity {trans.quantity}, Amount {abs(trans.amount)}, Adjustment {adjustment}, Price per unit {price_per_unit:.2f}")
+
+        # --- Process Sells ---
         elif trans.is_sell:
+            # BEFORE removing shares, determine how many of the current holdings
+            # (purchased within the 30-day wash sale window) will remain AFTER the sale.
+            # Only shares still held after the sale count as replacement shares.
+            current_holding_wash = sum(
+                lot.quantity for lot in holdings[trans.instrument][trans.is_option]
+                if (trans.date - timedelta(days=30)) <= lot.date <= trans.date
+            )
+            used_from_current = min(trans.quantity, current_holding_wash)
+            remaining_current_replacement = current_holding_wash - used_from_current
+
             remaining_to_sell = trans.quantity
-            realized_gain_loss = 0.0
             sale_proceeds = abs(trans.amount)
-            price_per_unit = sale_proceeds / trans.quantity
-            
+            sale_price_per_share = sale_proceeds / trans.quantity
+            sale_cost_basis = 0.0
+            # Remove shares from holdings using FIFO.
             while remaining_to_sell > 0 and holdings[trans.instrument][trans.is_option]:
                 lot = holdings[trans.instrument][trans.is_option][0]
-                sell_quantity = min(remaining_to_sell, lot.quantity)
-                
-                # Calculate gain/loss based on total amounts
-                lot_cost_basis = (lot.price * sell_quantity)
-                sale_amount = price_per_unit * sell_quantity
-                gain_loss = sale_amount - lot_cost_basis
-                
-                print(f"  -> Selling {sell_quantity} from lot ({lot.quantity} @ ${lot.price:.2f} from {lot.date})")
-                print(f"     Sale amount: ${sale_amount:.2f}, Cost basis: ${lot_cost_basis:.2f}")
-                print(f"     Gain/Loss: ${gain_loss:.2f}")
-                
-                if gain_loss < 0:
-                    window_start = trans.date
-                    window_end = trans.date + timedelta(days=30)
-                    
-                    if find_replacement_shares(trans, window_start, window_end):
-                        print(f"  🔴 Wash Sale: Loss of ${-gain_loss:.2f} deferred")
-                        disallowed_losses[trans.instrument] += -gain_loss
-                        gain_loss = 0  # Disallow the loss
-                    else:
-                        print(f"  ✅ Regular Loss: ${gain_loss:.2f} realized")
-                        realized_losses[trans.instrument] += gain_loss
-                else:
-                    realized_gains[trans.instrument] += gain_loss
-                
-                # Update or remove the lot
-                if lot.quantity > sell_quantity:
-                    lot.quantity -= sell_quantity
+                sell_qty = min(remaining_to_sell, lot.quantity)
+                sale_cost_basis += sell_qty * lot.price
+                if lot.quantity > sell_qty:
+                    lot.quantity -= sell_qty
                     lot.total_cost = lot.quantity * lot.price
                 else:
                     holdings[trans.instrument][trans.is_option].popleft()
-                    
-                remaining_to_sell -= sell_quantity
-                realized_gain_loss += gain_loss
-    
+                remaining_to_sell -= sell_qty
+
+            net_gain_loss = sale_proceeds - sale_cost_basis
+            print(f"Sell on {trans.date}: Proceeds {sale_proceeds:.2f}, Cost basis {sale_cost_basis:.2f}, Net {net_gain_loss:.2f}")
+
+            # Look ahead for future buys (after the sale) within 30 days.
+            future_replacement = sum(
+                t.quantity for t in transactions 
+                if t.is_buy 
+                and t.instrument == trans.instrument 
+                and t.is_option == trans.is_option
+                and trans.date < t.date <= trans.date + timedelta(days=30)
+            )
+            # Total replacement shares available: unsold current shares plus future buys.
+            replacement_qty = remaining_current_replacement + future_replacement
+
+            if net_gain_loss < 0:
+                if replacement_qty > 0:
+                    # Defer loss only for the number of shares that are actually replaced.
+                    deferred_qty = min(trans.quantity, replacement_qty)
+                    loss_per_share = (-net_gain_loss) / trans.quantity
+                    key = (trans.instrument, trans.is_option)
+                    pending_wash_sales[key].append({
+                        'remaining_qty': deferred_qty,
+                        'loss_per_share': loss_per_share,
+                        'expiration': trans.date + timedelta(days=30)
+                    })
+                    disallowed_losses[trans.instrument] += deferred_qty * loss_per_share
+                    # For shares not covered by a replacement, realize the loss.
+                    realized_loss_qty = trans.quantity - deferred_qty
+                    if realized_loss_qty > 0:
+                        realized_losses[trans.instrument] += (net_gain_loss)# + (deferred_qty * loss_per_share)
+                        print(f"  🔴 Partial Wash Sale: {deferred_qty} shares deferred, {realized_loss_qty} shares loss realized")
+                    else:
+                        print(f"  🔴 Wash Sale: Entire loss of {(-net_gain_loss):.2f} deferred at {loss_per_share:.2f} per share")
+                else:
+                    # No replacement shares: the entire loss is realized.
+                    realized_losses[trans.instrument] += net_gain_loss
+                    print(f"  ✅ Loss of {net_gain_loss:.2f} realized")
+            else:
+                realized_gains[trans.instrument] += net_gain_loss
+                print(f"  ✅ Gain of {net_gain_loss:.2f} realized")
+            print(f"---Realized losses: {realized_losses[trans.instrument]}")
+
+    # --- Final Summary ---
     print("\n🔹 Final Summary 🔹")
-    total_gain_loss = 0
-    
-    for instrument in set(t.instrument for t in transactions):
+    total_gain_loss = 0.0
+    instruments = set(t.instrument for t in transactions)
+    for instrument in instruments:
         print(f"\n{instrument} Summary:")
-        
-        # Print remaining positions
         for is_option, lots in holdings[instrument].items():
             if lots:
                 type_str = "Options" if is_option else "Stocks"
-                total_quantity = sum(lot.quantity for lot in lots)
+                total_qty = sum(lot.quantity for lot in lots)
                 total_cost_basis = sum(lot.total_cost for lot in lots)
                 print(f"  {type_str}:")
-                print(f"    - Final Quantity: {total_quantity}")
+                print(f"    - Final Quantity: {total_qty}")
                 print(f"    - Final Cost Basis: ${total_cost_basis:.2f}")
-        
-        # Print trading summary
-        print(f"  Trading Summary:")
+        print("  Trading Summary:")
         print(f"    - Total Realized Gains: ${realized_gains[instrument]:.2f}")
         print(f"    - Total Realized Losses: ${realized_losses[instrument]:.2f}")
-        print(f"    - Disallowed Losses (Wash Sales): ${disallowed_losses[instrument]:.2f}")
-        net_gain_loss = realized_gains[instrument] + realized_losses[instrument]
-        print(f"    - Net Realized Gain/Loss: ${net_gain_loss:.2f}")
-        print(f"    - Running Total: ${total_gain_loss:.2f}")
-        
-        total_gain_loss += net_gain_loss
-    
+        print(f"    - Total Deferred (Wash Sale) Losses: ${disallowed_losses[instrument]:.2f}")
+        print(f"    --- {realized_gains[instrument]} - {realized_losses[instrument]}")
+        net = realized_gains[instrument] + realized_losses[instrument]
+        print(f"    - Net Realized Gain/Loss: ${net:.2f}")
+        total_gain_loss += net
     print(f"\n🔹 Total Capital Gain/Loss for {tax_year}: ${total_gain_loss:.2f}\n")
-    
     return total_gain_loss
 
 def calculate_dividends_interest(cursor, tax_year):
