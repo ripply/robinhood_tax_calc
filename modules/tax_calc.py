@@ -74,7 +74,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         SELECT activity_date, settle_date, instrument, trans_code, quantity, amount, description
         FROM transactions
         WHERE trans_code IN ('Buy', 'BCXL', 'Sell', 'BTO', 'STC', 'OEXP')
-        ORDER BY activity_date, process_date, settle_date, -row
+        ORDER BY instrument, activity_date, process_date, settle_date, -row
     """)
 
     def parse_date(date_string: str) -> datetime.date:
@@ -123,7 +123,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
 
     # Process transactions sequentially.
     for trans in transactions:
-        print(trans)
         key = get_key(trans)
 
         # --- Process Buys ---
@@ -147,7 +146,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 is_option=trans.is_option
             )
             holdings[key].append(new_lot)
-            print(f"Buy on {trans.date}: Quantity {trans.quantity}, Amount {abs(trans.amount)}, Adjustment {adjustment}, Price per unit {price_per_unit:.2f}")
+            print(f"{trans.instrument} Buy on {trans.date}: Quantity {trans.quantity}, Amount {abs(trans.amount)}, Adjustment {adjustment}, Price per unit {price_per_unit:.2f}")
 
         # --- Process Sells ---
         elif trans.is_sell:
@@ -163,7 +162,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             sale_price_per_share = sale_proceeds / trans.quantity
 
             # Process sale using FIFO.
-            sale_breakdowns = []  # Each tuple: (sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days)
+            sale_breakdowns = []  # Each tuple: (sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days, acquisition_date)
             remaining_to_sell = trans.quantity
             sale_cost_basis = 0.0
             while remaining_to_sell > 0 and holdings[key]:
@@ -172,7 +171,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 cost_basis_chunk = sell_qty * lot.price
                 proceeds_chunk = sell_qty * sale_price_per_share
                 holding_period_days = (trans.date - lot.date).days
-                sale_breakdowns.append((sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days))
+                sale_breakdowns.append((sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days, lot.date))
                 sale_cost_basis += cost_basis_chunk
 
                 if lot.quantity > sell_qty:
@@ -183,13 +182,19 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 remaining_to_sell -= sell_qty
 
             net_gain_loss = sale_proceeds - sale_cost_basis
-            print(f"Sell on {trans.date}: Proceeds ${sale_proceeds:.2f}, Cost basis ${sale_cost_basis:.2f}, Net ${net_gain_loss:.2f}")
+            print(f"{trans.instrument} Sell on {trans.date}: Quantity: {trans.quantity}  Proceeds: ${sale_proceeds:.2f}, Cost Basis: ${sale_cost_basis:.2f}, Net: ${net_gain_loss:.2f}")
+
+            # Print FIFO breakdown details including acquisition dates.
+            for i, breakdown in enumerate(sale_breakdowns, start=1):
+                sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days, acquisition_date = breakdown
+                print(f"  FIFO Lot {i}: Sold {sell_qty} shares acquired on {acquisition_date} (Held for {holding_period_days} days), "
+                    f"Cost Basis: ${cost_basis_chunk:.2f}, Proceeds: ${proceeds_chunk:.2f}")
 
             gross_sales[trans.instrument] += sale_proceeds
             gross_cost_basis[trans.instrument] += sale_cost_basis
 
             # Update metrics based on holding period.
-            for sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days in sale_breakdowns:
+            for sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days, _ in sale_breakdowns:
                 gain_loss_chunk = proceeds_chunk - cost_basis_chunk
                 if holding_period_days >= 365:
                     long_term_gain[trans.instrument] += gain_loss_chunk
