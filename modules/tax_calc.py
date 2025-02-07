@@ -24,13 +24,14 @@ class Transaction:
     instrument: str
     trans_type: str
     quantity: float
+    quantity_str: str
     amount: float
     description: str
 
     @property
     def is_option(self) -> bool:
-        # In this context BTO and STC are considered option trades.
-        return self.trans_type in ('BTO', 'STC')
+        # In this context BTO, STC, and OEXP are considered option trades.
+        return self.trans_type in ('BTO', 'STC', 'OEXP')
 
     @property
     def is_buy(self) -> bool:
@@ -43,11 +44,20 @@ class Transaction:
 def get_key(trans: Transaction) -> tuple:
     """
     Returns a key used to segregate lots and wash sale adjustments.
-    For options, use (instrument, description) so that options on different strikes 
-    (or expiration dates) are handled separately. For stocks, use (instrument, False).
+    For options (including expirations), use (instrument, description) so that 
+    options on different strikes (or expiration dates) are handled separately.
+    For stocks, use (instrument, False).
+
+    For OEXP transactions, remove the "Option Expiration for " prefix so that
+    the key matches the description used for the original options.
     """
     if trans.is_option:
-        return (trans.instrument, trans.description)
+        desc = trans.description
+        if trans.trans_type == 'OEXP':
+            prefix = "Option Expiration for "
+            if desc.startswith(prefix):
+                desc = desc[len(prefix):].strip()
+        return (trans.instrument, desc)
     else:
         return (trans.instrument, False)
 
@@ -58,46 +68,54 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     In this version:
       • When a sell occurs, we remove shares from FIFO holdings until the sale
         quantity is filled, and then compute one overall net gain/loss for that sale.
-      • If the sale results in a loss, we now defer the loss only for the number
-        of shares that will remain (or be purchased later) within 30 days.
+      • If the sale results in a loss, we defer the loss only for the number
+        of shares that will be replaced within 30 days.
+      • Option expiration events (trans_code "OEXP") are processed similarly to sells,
+        except that if no quantity is provided, all open options for that strike are expired.
       
-    By keying options using their full description, call strikes with different prices
-    (or expiration dates) are processed separately.
+    Options are keyed using (instrument, description) so that different strikes/expirations
+    are processed separately.
     """
+    # Include OEXP in the query.
     cursor.execute("""
         SELECT activity_date, settle_date, instrument, trans_code, quantity, amount, description
         FROM transactions
-        WHERE trans_code IN ('Buy', 'BCXL', 'Sell', 'BTO', 'STC')
+        WHERE trans_code IN ('Buy', 'BCXL', 'Sell', 'BTO', 'STC', 'OEXP')
         ORDER BY activity_date, process_date, settle_date, -row
     """)
 
     def parse_date(date_string: str) -> datetime.date:
         return datetime.fromisoformat(date_string).date()
 
+    # For the quantity field, if it is empty (as is the case for OEXP), use 0.0.
     transactions: List[Transaction] = [
         Transaction(
             date=parse_date(row[0]),
             settle_date=row[1],
             instrument=row[2],
             trans_type=row[3],
-            quantity=float(row[4]),
+            quantity=0.0,
+            quantity_str=row[4],
             amount=float(row[5]),
             description=row[6]
         )
         for row in cursor.fetchall()
     ]
 
-    # Use a single dictionary keyed by (instrument, identifier)
-    # For options, the identifier is the description; for stocks, simply False.
-    holdings: Dict[tuple, Deque[Lot]] = defaultdict(deque)
+    for trans in transactions:
+        try:
+            trans.quantity = float(trans.quantity_str)
+        except ValueError:
+            trans.quantity = 0.0
 
+    # Dictionary keyed by (instrument, identifier)
+    holdings: Dict[tuple, Deque[Lot]] = defaultdict(deque)
     # pending_wash_sales holds deferred loss adjustments keyed in the same way.
     pending_wash_sales: Dict[tuple, List[dict]] = defaultdict(list)
-
     # Track realized gains and realized losses (losses not deferred)
     realized_gains: Dict[str, float] = defaultdict(float)
     realized_losses: Dict[str, float] = defaultdict(float)
-    # (For debugging/reporting we also track total deferred (disallowed) loss.)
+    # (For reporting, also track total deferred (disallowed) losses.)
     disallowed_losses: Dict[str, float] = defaultdict(float)
 
     # Process transactions sequentially.
@@ -109,7 +127,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         if trans.is_buy:
             total_cost = abs(trans.amount)
             adjustment = 0.0
-            # Apply any pending wash sale adjustments if this buy occurs on/before their expiration.
+            # Apply any pending wash sale adjustments if this buy occurs on or before their expiration.
             for pending in pending_wash_sales[key][:]:
                 if trans.date <= pending['expiration']:
                     shares_to_apply = min(trans.quantity, pending['remaining_qty'])
@@ -140,7 +158,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
 
             remaining_to_sell = trans.quantity
             sale_proceeds = abs(trans.amount)
-            sale_price_per_share = sale_proceeds / trans.quantity
             sale_cost_basis = 0.0
             # Remove shares from holdings using FIFO.
             while remaining_to_sell > 0 and holdings[key]:
@@ -162,7 +179,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 t.quantity for t in transactions 
                 if t.is_buy 
                 and t.instrument == trans.instrument 
-                and ( (t.description == trans.description) if trans.is_option else (t.is_option == trans.is_option) )
+                and ((t.description == trans.description) if trans.is_option else (t.is_option == trans.is_option))
                 and trans.date < t.date <= trans.date + timedelta(days=30)
             )
             # Total replacement shares available: unsold current shares plus future buys.
@@ -194,6 +211,77 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 realized_gains[trans.instrument] += net_gain_loss
                 print(f"  ✅ Gain of {net_gain_loss:.2f} realized")
             print(f"---Realized losses: {realized_losses[trans.instrument]}")
+
+        # --- Process Option Expiration ---
+        elif trans.trans_type == 'OEXP':
+            # For expiration events, the quantity is not provided.
+            # Set trans.quantity to the total open quantity for this option strike.
+            if trans.quantity == 0:
+                total_open_qty = sum(lot.quantity for lot in holdings[key])
+                trans.quantity = total_open_qty
+                print(f"Option Expiration on {trans.date}: Expiring all open contracts for strike, total quantity set to {trans.quantity}")
+
+            # Calculate replacement shares among lots purchased in the 30-day window.
+            current_holding_wash = sum(
+                lot.quantity for lot in holdings[key]
+                if (trans.date - timedelta(days=30)) <= lot.date <= trans.date
+            )
+            used_from_current = min(trans.quantity, current_holding_wash)
+            remaining_current_replacement = current_holding_wash - used_from_current
+
+            # Look ahead for future buys (after the expiration) within 30 days.
+            future_replacement = sum(
+                t.quantity for t in transactions 
+                if t.is_buy 
+                and t.instrument == trans.instrument 
+                and ((t.description == trans.description) if (t.trans_type in ('BTO', 'STC', 'OEXP')) else False)
+                and trans.date < t.date <= trans.date + timedelta(days=30)
+            )
+            replacement_qty = remaining_current_replacement + future_replacement
+
+            # Process the expiration like a sale: remove lots using FIFO.
+            remaining_to_expire = trans.quantity
+            expiration_proceeds = abs(trans.amount)
+            expiration_cost_basis = 0.0
+            while remaining_to_expire > 0 and holdings[key]:
+                lot = holdings[key][0]
+                expire_qty = min(remaining_to_expire, lot.quantity)
+                expiration_cost_basis += expire_qty * lot.price
+                if lot.quantity > expire_qty:
+                    lot.quantity -= expire_qty
+                    lot.total_cost = lot.quantity * lot.price
+                else:
+                    holdings[key].popleft()
+                remaining_to_expire -= expire_qty
+
+            net_gain_loss = expiration_proceeds - expiration_cost_basis
+            print(f"Option Expiration on {trans.date}: Proceeds {expiration_proceeds:.2f}, Cost basis {expiration_cost_basis:.2f}, Net {net_gain_loss:.2f}")
+
+            if net_gain_loss < 0:
+                if replacement_qty > 0:
+                    deferred_qty = min(trans.quantity, replacement_qty)
+                    loss_per_share = (-net_gain_loss) / trans.quantity
+                    pending_wash_sales[key].append({
+                        'remaining_qty': deferred_qty,
+                        'loss_per_share': loss_per_share,
+                        'expiration': trans.date + timedelta(days=30)
+                    })
+                    disallowed_losses[trans.instrument] += deferred_qty * loss_per_share
+                    realized_loss_qty = trans.quantity - deferred_qty
+                    if realized_loss_qty > 0:
+                        realized_losses[trans.instrument] += (net_gain_loss) + (deferred_qty * loss_per_share)
+                        print(f"  🔴 Partial Wash Sale: {deferred_qty} contracts deferred, {realized_loss_qty} contracts loss realized")
+                    else:
+                        print(f"  🔴 Wash Sale: Entire loss of {(-net_gain_loss):.2f} deferred at {loss_per_share:.2f} per contract")
+                else:
+                    realized_losses[trans.instrument] += net_gain_loss
+                    print(f"  ✅ Loss of {net_gain_loss:.2f} realized")
+            else:
+                realized_gains[trans.instrument] += net_gain_loss
+                print(f"  ✅ Gain of {net_gain_loss:.2f} realized")
+            print(f"---Realized losses: {realized_losses[trans.instrument]}")
+
+        # (Any additional transaction types can be handled here...)
 
     # --- Final Summary ---
     print("\n🔹 Final Summary 🔹")
