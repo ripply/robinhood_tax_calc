@@ -30,7 +30,7 @@ class Transaction:
 
     @property
     def is_option(self) -> bool:
-        # In this context BTO, STC, and OEXP are considered option trades.
+        # BTO, STC, and OEXP are treated as option transactions.
         return self.trans_type in ('BTO', 'STC', 'OEXP')
 
     @property
@@ -45,7 +45,7 @@ def get_key(trans: Transaction) -> tuple:
     """
     Returns a key used to segregate lots and wash sale adjustments.
     For options (including expirations), use (instrument, description) so that 
-    options on different strikes (or expiration dates) are handled separately.
+    options on different strikes/expirations are handled separately.
     For stocks, use (instrument, False).
 
     For OEXP transactions, remove the "Option Expiration for " prefix so that
@@ -63,22 +63,13 @@ def get_key(trans: Transaction) -> tuple:
 
 def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     """
-    Calculate capital gains/losses with aggregated wash sale handling.
+    Processes transactions to compute gains/losses with wash sale handling.
     
-    In this version:
-      • When a sell occurs, we remove shares from FIFO holdings until the sale
-        quantity is filled, and then compute one overall net gain/loss for that sale.
-      • If the sale results in a loss, we defer the loss only for the number
-        of shares that will be replaced within 30 days.
-      • Option expiration events (trans_code "OEXP") are processed similarly to sells,
-        except that if no quantity is provided, all open options for that strike are expired.
-      
-    Additionally, this version tracks:
-      • Gross Sales (total sale proceeds)
-      • Gross Cost Basis (total cost basis allocated to sold shares/contracts)
-      • Long Term and Short Term Capital Gains/Losses (using a 1-year/365-day cutoff)
+    In addition to previously tracked metrics, this version also computes:
+      • Gross Long Term Sales and Cost Basis
+      • Gross Short Term Sales and Cost Basis
+    (A holding period of 365 days or more qualifies as long term.)
     """
-    # Include OEXP in the query.
     cursor.execute("""
         SELECT activity_date, settle_date, instrument, trans_code, quantity, amount, description
         FROM transactions
@@ -89,7 +80,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
     def parse_date(date_string: str) -> datetime.date:
         return datetime.fromisoformat(date_string).date()
 
-    # For the quantity field, if it is empty (as is the case for OEXP), use 0.0.
     transactions: List[Transaction] = [
         Transaction(
             date=parse_date(row[0]),
@@ -110,21 +100,26 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         except ValueError:
             trans.quantity = 0.0
 
-    # Dictionary keyed by (instrument, identifier)
+    # Holdings by key (instrument, identifier)
     holdings: Dict[tuple, Deque[Lot]] = defaultdict(deque)
-    # pending_wash_sales holds deferred loss adjustments keyed in the same way.
+    # For deferred loss adjustments due to wash sale rules.
     pending_wash_sales: Dict[tuple, List[dict]] = defaultdict(list)
-    # Track realized gains and realized losses (losses not deferred)
+    # Realized metrics.
     realized_gains: Dict[str, float] = defaultdict(float)
     realized_losses: Dict[str, float] = defaultdict(float)
-    # (For reporting, also track total deferred (disallowed) losses.)
     disallowed_losses: Dict[str, float] = defaultdict(float)
 
-    # --- NEW: Additional metrics for sale transactions ---
+    # Previously tracked sale metrics.
     gross_sales: Dict[str, float] = defaultdict(float)
     gross_cost_basis: Dict[str, float] = defaultdict(float)
     long_term_gain: Dict[str, float] = defaultdict(float)
     short_term_gain: Dict[str, float] = defaultdict(float)
+
+    # NEW: Additional dictionaries for gross long term / short term breakdown.
+    gross_long_term_sales: Dict[str, float] = defaultdict(float)
+    gross_short_term_sales: Dict[str, float] = defaultdict(float)
+    gross_long_term_cost_basis: Dict[str, float] = defaultdict(float)
+    gross_short_term_cost_basis: Dict[str, float] = defaultdict(float)
 
     # Process transactions sequentially.
     for trans in transactions:
@@ -135,7 +130,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         if trans.is_buy:
             total_cost = abs(trans.amount)
             adjustment = 0.0
-            # Apply any pending wash sale adjustments if this buy occurs on or before their expiration.
+            # Apply pending wash sale adjustments.
             for pending in pending_wash_sales[key][:]:
                 if trans.date <= pending['expiration']:
                     shares_to_apply = min(trans.quantity, pending['remaining_qty'])
@@ -143,7 +138,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                     pending['remaining_qty'] -= shares_to_apply
                     if pending['remaining_qty'] <= 0:
                         pending_wash_sales[key].remove(pending)
-            total_cost += adjustment  # Increase cost basis by deferred loss adjustment.
+            total_cost += adjustment  # Increase cost basis by deferred loss.
             price_per_unit = total_cost / trans.quantity
             new_lot = Lot(
                 quantity=trans.quantity,
@@ -156,7 +151,7 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
 
         # --- Process Sells ---
         elif trans.is_sell:
-            # Calculate replacement shares among lots purchased in the 30-day window.
+            # Determine replacement shares for wash sale rules.
             current_holding_wash = sum(
                 lot.quantity for lot in holdings[key]
                 if (trans.date - timedelta(days=30)) <= lot.date <= trans.date
@@ -165,14 +160,12 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             remaining_current_replacement = current_holding_wash - used_from_current
 
             sale_proceeds = abs(trans.amount)
-            # Calculate sale price per share (assumes a constant price per share for the entire transaction)
             sale_price_per_share = sale_proceeds / trans.quantity
 
-            # --- NEW: Record per-lot breakdown for additional metrics ---
-            sale_breakdowns = []
+            # Process sale using FIFO.
+            sale_breakdowns = []  # Each tuple: (sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days)
             remaining_to_sell = trans.quantity
             sale_cost_basis = 0.0
-            # Remove shares from holdings using FIFO.
             while remaining_to_sell > 0 and holdings[key]:
                 lot = holdings[key][0]
                 sell_qty = min(remaining_to_sell, lot.quantity)
@@ -192,17 +185,22 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             net_gain_loss = sale_proceeds - sale_cost_basis
             print(f"Sell on {trans.date}: Proceeds ${sale_proceeds:.2f}, Cost basis ${sale_cost_basis:.2f}, Net ${net_gain_loss:.2f}")
 
-            # Update additional metrics from sale_breakdowns.
             gross_sales[trans.instrument] += sale_proceeds
             gross_cost_basis[trans.instrument] += sale_cost_basis
+
+            # Update metrics based on holding period.
             for sell_qty, cost_basis_chunk, proceeds_chunk, holding_period_days in sale_breakdowns:
                 gain_loss_chunk = proceeds_chunk - cost_basis_chunk
                 if holding_period_days >= 365:
                     long_term_gain[trans.instrument] += gain_loss_chunk
+                    gross_long_term_sales[trans.instrument] += proceeds_chunk
+                    gross_long_term_cost_basis[trans.instrument] += cost_basis_chunk
                 else:
                     short_term_gain[trans.instrument] += gain_loss_chunk
+                    gross_short_term_sales[trans.instrument] += proceeds_chunk
+                    gross_short_term_cost_basis[trans.instrument] += cost_basis_chunk
 
-            # Look ahead for future buys (after the sale) within 30 days.
+            # Look ahead for replacement shares (wash sale rule).
             future_replacement = sum(
                 t.quantity for t in transactions 
                 if t.is_buy 
@@ -210,12 +208,10 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 and ((t.description == trans.description) if trans.is_option else (t.is_option == trans.is_option))
                 and trans.date < t.date <= trans.date + timedelta(days=30)
             )
-            # Total replacement shares available: unsold current shares plus future buys.
             replacement_qty = remaining_current_replacement + future_replacement
 
             if net_gain_loss < 0:
                 if replacement_qty > 0:
-                    # Defer loss only for the number of shares that are actually replaced.
                     deferred_qty = min(trans.quantity, replacement_qty)
                     loss_per_share = (-net_gain_loss) / trans.quantity
                     pending_wash_sales[key].append({
@@ -224,7 +220,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                         'expiration': trans.date + timedelta(days=30)
                     })
                     disallowed_losses[trans.instrument] += deferred_qty * loss_per_share
-                    # For shares not covered by a replacement, realize the loss.
                     realized_loss_qty = trans.quantity - deferred_qty
                     if realized_loss_qty > 0:
                         realized_losses[trans.instrument] += (net_gain_loss) + (deferred_qty * loss_per_share)
@@ -232,7 +227,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                     else:
                         print(f"  🔴 Wash Sale: Entire loss of ${(-net_gain_loss):.2f} deferred at ${loss_per_share:.2f} per share")
                 else:
-                    # No replacement shares: the entire loss is realized.
                     realized_losses[trans.instrument] += net_gain_loss
                     print(f"  ✅ Loss of ${net_gain_loss:.2f} realized")
             else:
@@ -242,14 +236,11 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
 
         # --- Process Option Expiration ---
         elif trans.trans_type == 'OEXP':
-            # For expiration events, the quantity is not provided.
-            # Set trans.quantity to the total open quantity for this option strike.
             if trans.quantity == 0:
                 total_open_qty = sum(lot.quantity for lot in holdings[key])
                 trans.quantity = total_open_qty
                 print(f"Option Expiration on {trans.date}: Expiring all open contracts for strike, total quantity set to {trans.quantity}")
 
-            # Calculate replacement shares among lots purchased in the 30-day window.
             current_holding_wash = sum(
                 lot.quantity for lot in holdings[key]
                 if (trans.date - timedelta(days=30)) <= lot.date <= trans.date
@@ -257,7 +248,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             used_from_current = min(trans.quantity, current_holding_wash)
             remaining_current_replacement = current_holding_wash - used_from_current
 
-            # Look ahead for future buys (after the expiration) within 30 days.
             future_replacement = sum(
                 t.quantity for t in transactions 
                 if t.is_buy 
@@ -270,7 +260,6 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             expiration_proceeds = abs(trans.amount)
             expiration_price_per_share = expiration_proceeds / trans.quantity
 
-            # --- NEW: Record per-lot breakdown for option expiration ---
             expiration_breakdowns = []
             remaining_to_expire = trans.quantity
             expiration_cost_basis = 0.0
@@ -293,15 +282,18 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
             net_gain_loss = expiration_proceeds - expiration_cost_basis
             print(f"Option Expiration on {trans.date}: Proceeds ${expiration_proceeds:.2f}, Cost basis ${expiration_cost_basis:.2f}, Net ${net_gain_loss:.2f}")
 
-            # Update additional metrics from expiration_breakdowns.
             gross_sales[trans.instrument] += expiration_proceeds
             gross_cost_basis[trans.instrument] += expiration_cost_basis
             for expire_qty, cost_basis_chunk, proceeds_chunk, holding_period_days in expiration_breakdowns:
                 gain_loss_chunk = proceeds_chunk - cost_basis_chunk
                 if holding_period_days >= 365:
                     long_term_gain[trans.instrument] += gain_loss_chunk
+                    gross_long_term_sales[trans.instrument] += proceeds_chunk
+                    gross_long_term_cost_basis[trans.instrument] += cost_basis_chunk
                 else:
                     short_term_gain[trans.instrument] += gain_loss_chunk
+                    gross_short_term_sales[trans.instrument] += proceeds_chunk
+                    gross_short_term_cost_basis[trans.instrument] += cost_basis_chunk
 
             if net_gain_loss < 0:
                 if replacement_qty > 0:
@@ -327,17 +319,14 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
                 print(f"  ✅ Gain of ${net_gain_loss:.2f} realized")
             print(f"---Realized losses: {realized_losses[trans.instrument]}")
 
-        # (Any additional transaction types can be handled here...)
-
     # --- Final Summary ---
     print("\n🔹 Final Summary 🔹")
     total_gain_loss = 0.0
 
-    # Collect holdings by instrument so we can report both stocks and options separately.
+    # Organize holdings by instrument for summary reporting.
     holdings_by_instrument: Dict[str, Dict[str, Deque[Lot]]] = defaultdict(dict)
     for key, lots in holdings.items():
         instrument, ident = key
-        # For stocks the ident is False; otherwise use the description string.
         bucket = ident if ident is not False else "Stocks"
         holdings_by_instrument[instrument][bucket] = lots
 
@@ -359,6 +348,10 @@ def calculate_stock_gains_and_losses(cursor, tax_year: int) -> float:
         print(f"    - Gross Cost Basis (for sales): ${gross_cost_basis[instrument]:.2f}")
         print(f"    - Long Term Capital Gain/Loss: ${long_term_gain[instrument]:.2f}")
         print(f"    - Short Term Capital Gain/Loss: ${short_term_gain[instrument]:.2f}")
+        print(f"    - Gross Long Term Sales: ${gross_long_term_sales[instrument]:.2f}")
+        print(f"    - Gross Short Term Sales: ${gross_short_term_sales[instrument]:.2f}")
+        print(f"    - Gross Long Term Cost Basis: ${gross_long_term_cost_basis[instrument]:.2f}")
+        print(f"    - Gross Short Term Cost Basis: ${gross_short_term_cost_basis[instrument]:.2f}")
         net = realized_gains[instrument] + realized_losses[instrument]
         print(f"    - Net Realized Gain/Loss: ${net:.2f}")
         total_gain_loss += net
